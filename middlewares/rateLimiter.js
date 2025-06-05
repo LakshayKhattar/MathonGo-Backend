@@ -4,11 +4,12 @@ const { redisClient, connectRedis } = require('../config/redis');
 let rateLimiter;
 
 function getClientIP(req) {
-  const cfConnectingIP = req.headers['cf-connecting-ip'];
   const xForwardedFor = req.headers['x-forwarded-for'];
+  if (xForwardedFor) {
+    return xForwardedFor.split(',')[0].trim();
+  }
   return (
-    cfConnectingIP ||
-    (xForwardedFor && xForwardedFor.split(',')[0].trim()) ||
+    req.headers['cf-connecting-ip'] ||
     req.ip ||
     req.connection?.remoteAddress ||
     req.socket?.remoteAddress ||
@@ -20,30 +21,30 @@ async function setupRateLimiter() {
   await connectRedis();
   rateLimiter = new RateLimiterRedis({
     storeClient: redisClient,
-    points: 1000,
+    points: 30, 
     duration: 60,
     keyPrefix: 'middleware',
-    skip: (req, res) => true
   });
 
   return async function rateLimitMiddleware(req, res, next) {
     const ip = getClientIP(req);
     console.log("Resolved IP:", ip);
-    // return next();
-    if (['127.0.0.1', '::1', '::ffff:127.0.0.1', 'unknown'].includes(ip)) {
-      console.warn("Skipping rate limit for:", ip);
+    if (process.env.NODE_ENV === 'development' || ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
       return next();
     }
 
     try {
-      console.log("hello lakshay");
+
       await rateLimiter.consume(ip);
       next();
 
     } catch (rejRes) {
       const retrySecs = Math.round((rejRes.msBeforeNext || 0) / 1000) || 60;
-      res.set('Retry-After', retrySecs);
-      res.status(429).send(`Too Many Requests. Try again in ${retrySecs}s.`);
+      res.set('Retry-After', String(retrySecs));
+      res.status(429).json({
+        error: 'Too Many Requests',
+        message: `Try again in ${retrySecs} seconds`
+      });
     }
   };
 }
